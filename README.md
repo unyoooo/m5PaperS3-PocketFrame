@@ -56,9 +56,21 @@ Tap the screen to open the menu bar with file info and battery level.
 | List | Browse folders and images on SD card |
 | Slide | Slideshow with HH:MM:SS interval picker (max 24h) |
 | Comm | Wi-Fi file manager (see above) |
-| Cfg | Settings — language toggle (日本語 / English) |
+| Cfg | Settings — language, rotation, save to device |
 
 Tap outside the buttons to dismiss the menu.
+
+### Settings
+
+<p align="center">
+  <img src="README_img/setting_EN.jpeg" width="420" alt="Settings screen">
+</p>
+
+| Setting | Description |
+|---------|-------------|
+| Language | Switch between 日本語 / English |
+| Rotation | Normal or 180° flip (for upside-down mounting) |
+| Save Image to Device | Save current image to flash (1 image only). Displayed when no SD card is inserted |
 
 ### Slideshow with Smart Power Saving
 - **Under 60s interval**: Light Sleep — tap responsive, ~40x power saving
@@ -76,6 +88,11 @@ Not sure about all the details, but it does its best to save power.
 ### Internationalization
 - Device UI and Web UI both support **Japanese / English**
 - Language setting persists across power cycles
+
+### Device Image Backup
+- Save one image to the device's internal flash memory
+- When no SD card is inserted, the saved image is displayed automatically
+- Great as a default display or emergency backup
 
 ---
 
@@ -131,7 +148,7 @@ Not sure about all the details, but it does its best to save power.
 | Display | M5GFX (LovyanGFX), epd_quality / epd_fast |
 | Image decode | PSRAM two-sprite pipeline + pushRotateZoomWithAA |
 | Sleep | esp_light_sleep / M5.Power.deepSleep |
-| State save | RTC_DATA_ATTR + NVS (Preferences) |
+| State save | RTC_DATA_ATTR + NVS (Preferences) + LittleFS |
 | Wi-Fi | WIFI_AP + WebServer (built-in) |
 | CPU scaling | 80MHz idle / 240MHz decode & Wi-Fi |
 | Flash usage | ~84% |
@@ -169,6 +186,5 @@ MIT
 
 ## Version
 
+- **v1.1** — Settings: 180° rotation, save image to device (LittleFS), SD-removal safety
 - **v1.0** — Initial release
-  
-  @unyoo 

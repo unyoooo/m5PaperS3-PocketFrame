@@ -18,6 +18,7 @@
 #include <esp_sleep.h>
 #include <esp32-hal-cpu.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include <vector>
 #include <algorithm>
 #include <string>
@@ -84,6 +85,16 @@ struct Strings {
     const char* settings_title;
     const char* settings_lang;
     const char* settings_back;
+    const char* settings_rotation;
+    const char* settings_rot_normal;
+    const char* settings_rot_flip;
+    const char* btn_save_fav;
+    const char* save_fav_desc1;
+    const char* save_fav_desc2;
+    const char* msg_fav_saved;
+    const char* msg_fav_fail;
+    const char* msg_no_sd_fav;
+    const char* msg_no_sd_no_fav;
     const char* msg_header;
 };
 
@@ -111,6 +122,14 @@ static const Strings STR_JA = {
     "  使用後は右の「終了」ボタンを押してください。",
     "終了",
     "設定", "言語 / Language", "戻る",
+    "画面の向き", "通常", "180° 回転",
+    "画像を本体に保存",
+    "現在の画像を本体に保存できます（1枚のみ）",
+    "SDカードが無い時に表示されます",
+    "本体に保存しました",
+    "保存に失敗しました（容量不足？）",
+    "SDカードなし — 本体の画像を表示中",
+    "SDカードを入れてください",
     "MESSAGE"
 };
 static const Strings STR_EN = {
@@ -137,6 +156,14 @@ static const Strings STR_EN = {
     "  Press Exit when done.",
     "Exit",
     "Settings", "Language", "Back",
+    "Rotation", "Normal", "180° Flip",
+    "Save Image to Device",
+    "Save current image to device (1 image only)",
+    "Shown when SD card is not inserted",
+    "Saved to device",
+    "Save failed (not enough space?)",
+    "No SD card — showing device image",
+    "Please insert SD card",
     "MESSAGE"
 };
 
@@ -154,6 +181,7 @@ struct Rect { int x, y, w, h; };
 RTC_DATA_ATTR static char s_saved_dir[160] = "";
 RTC_DATA_ATTR static char s_saved_file[96] = "";
 RTC_DATA_ATTR static uint32_t s_boot_count = 0;
+RTC_DATA_ATTR static uint8_t s_rotation = 1;  // 1=通常, 3=180°回転
 // 長間隔 (≥60s) の deep-sleep スライドショー継続用
 RTC_DATA_ATTR static bool     s_rtc_ss_active      = false;
 RTC_DATA_ATTR static uint32_t s_rtc_ss_interval_ms = 0;
@@ -196,10 +224,11 @@ static std::string s_ss_dir;
 // ----- 前方宣言 -----
 static bool initSD();
 static void scanDir(const char* dir);
-static bool getJpgSize(const char* path, int& w, int& h);
-static bool getPngSize(const char* path, int& w, int& h);
-static void drawFullScreenImg(ImgKind kind, const char* path);
-static void showCurrentImage();
+static bool getJpgSize(const char* path, int& w, int& h, fs::FS& fs = SD);
+static bool getPngSize(const char* path, int& w, int& h, fs::FS& fs = SD);
+static void drawFullScreenImg(ImgKind kind, const char* path, fs::FS& fs = SD);
+static bool showCurrentImage();
+static void showImageOrSleep();   // showCurrentImage + SD抜け時エラー→スリープ
 static void showMenuOverlay();
 static void hideMenuOverlay();
 static void showList();
@@ -225,6 +254,12 @@ static void goToDeepSleep();
 static void savePosition();
 static bool findFirstImage(const char* dir, int depth, std::string& outDir, std::string& outFile);
 static void saveLang(uint8_t lang);
+static bool saveFavorite();
+static bool hasFavorite(const char*& path, ImgKind& kind);
+static void saveRotation(uint8_t rot);
+static Rect settingsRotNormalRect();
+static Rect settingsRotFlipRect();
+static Rect settingsSaveFavRect();
 static void showSettings();
 static Rect settingsLangJaRect();
 static Rect settingsLangEnRect();
@@ -277,26 +312,53 @@ void setup() {
     ++s_boot_count;
     Serial.printf("\n======== BOOT %lu ========\n", (unsigned long)s_boot_count);
 
-    M5.Display.setRotation(1);
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
+
+    // 未使用の IMU をスリープさせて省電力
+    M5.Imu.sleep();
 
     // 案 C: デフォルトは 80MHz、必要時に 240MHz へ昇圧
     cpuLow();
 
-    // --- 言語設定を NVS から読み込み ---
+    // --- LittleFS 初期化 (お気に入り画像保存用) ---
+    if (!LittleFS.begin(true)) {
+        Serial.println("LittleFS mount failed");
+    } else {
+        Serial.printf("LittleFS: %u / %u bytes used\n",
+                      (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
+    }
+
+    // --- 言語・回転設定を NVS から読み込み ---
     {
         Preferences prefs;
         prefs.begin("viewer", true);   // read-only
         s_lang = prefs.getUChar("lang", LANG_JA);
+        s_rotation = prefs.getUChar("rot", 1);
         prefs.end();
         if (s_lang > LANG_EN) s_lang = LANG_JA;
-        Serial.printf("Language: %s\n", s_lang == LANG_EN ? "EN" : "JA");
+        if (s_rotation != 1 && s_rotation != 3) s_rotation = 1;
+        Serial.printf("Language: %s, Rotation: %d\n",
+                      s_lang == LANG_EN ? "EN" : "JA", s_rotation);
     }
+    M5.Display.setRotation(s_rotation);
 
     // --- SD カードのマウント ---
     if (!initSD()) {
-        drawError(S().msg_no_sd);
-        delay(3000);                 // 画面を読む時間を確保
+        // SD 無し → LittleFS にお気に入りがあれば表示
+        const char* fav_path = nullptr;
+        ImgKind fav_kind = IMG_NONE;
+        if (hasFavorite(fav_path, fav_kind)) {
+            Serial.println("[FAV] No SD, showing favorite");
+            drawError(S().msg_no_sd_fav);
+            delay(2000);
+            cpuHigh();
+            drawFullScreenImg(fav_kind, fav_path, LittleFS);
+            M5.Display.waitDisplay();
+            cpuLow();
+            goToDeepSleep();
+        }
+        drawError(S().msg_no_sd_no_fav);
+        delay(3000);
         goToDeepSleep();
     }
 
@@ -420,11 +482,11 @@ void loop() {
                     Serial.printf("Menu hit = %d\n", hit);
                     if (hit == 0) {                         // <
                         s_pos = (s_pos + s_image_idx.size() - 1) % s_image_idx.size();
-                        showCurrentImage();
+                        showImageOrSleep();
                         s_state = STATE_VIEW;
                     } else if (hit == 1) {                  // >
                         s_pos = (s_pos + 1) % s_image_idx.size();
-                        showCurrentImage();
+                        showImageOrSleep();
                         s_state = STATE_VIEW;
                     } else if (hit == 2) {                  // 画像リスト
                         s_view_dir = s_current_dir;
@@ -492,7 +554,7 @@ void loop() {
                                 // s_pos の妥当性チェック
                                 if (s_pos >= s_image_idx.size()) s_pos = 0;
                                 s_state = STATE_VIEW;
-                                showCurrentImage();
+                                showImageOrSleep();
                             }
                         }
                         break;
@@ -516,7 +578,7 @@ void loop() {
                                     if (s_image_idx[k] == idx) { s_pos = k; break; }
                                 }
                                 s_state = STATE_VIEW;
-                                showCurrentImage();
+                                showImageOrSleep();
                             }
                             // SS_PICK_FOLDER で画像タップは無視 (フォルダ選択専用)
                         }
@@ -550,7 +612,7 @@ void loop() {
                 // キャンセル
                 if (inRect(pickerCancelRect(), t.x, t.y)) {
                     s_state = STATE_VIEW;
-                    showCurrentImage();
+                    showImageOrSleep();
                     break;
                 }
                 // 開始
@@ -579,7 +641,7 @@ void loop() {
                     scanDir(s_current_dir.c_str());
                     if (s_pos >= s_image_idx.size()) s_pos = 0;
                     s_state = STATE_VIEW;
-                    showCurrentImage();
+                    showImageOrSleep();
                 }
                 break;
 
@@ -589,9 +651,20 @@ void loop() {
                         if (s_lang != LANG_JA) { saveLang(LANG_JA); showSettings(); }
                     } else if (inRect(settingsLangEnRect(), t.x, t.y)) {
                         if (s_lang != LANG_EN) { saveLang(LANG_EN); showSettings(); }
+                    } else if (inRect(settingsRotNormalRect(), t.x, t.y)) {
+                        if (s_rotation != 1) { saveRotation(1); showSettings(); }
+                    } else if (inRect(settingsRotFlipRect(), t.x, t.y)) {
+                        if (s_rotation != 3) { saveRotation(3); showSettings(); }
+                    } else if (inRect(settingsSaveFavRect(), t.x, t.y)) {
+                        cpuHigh();
+                        bool ok = saveFavorite();
+                        cpuLow();
+                        drawError(ok ? S().msg_fav_saved : S().msg_fav_fail);
+                        delay(2000);
+                        showSettings();
                     } else if (inRect(settingsBackRect(), t.x, t.y)) {
                         s_state = STATE_VIEW;
-                        showCurrentImage();
+                        showImageOrSleep();
                     }
                 }
                 break;
@@ -604,7 +677,14 @@ void loop() {
         if ((uint32_t)(millis() - s_ss_last_change) >= s_ss_interval_ms) {
             if (!s_image_idx.empty()) {
                 s_pos = (s_pos + 1) % s_image_idx.size();
-                showCurrentImage();
+                if (!showCurrentImage()) {
+                    // SD 抜けなど — スライドショー中断してスリープ
+                    Serial.println("[SS] image read failed, stopping slideshow");
+                    s_state = STATE_VIEW;
+                    drawError(S().msg_no_sd);
+                    delay(3000);
+                    goToDeepSleep();
+                }
             }
             s_ss_last_change = millis();
         }
@@ -744,8 +824,8 @@ static void scanDir(const char* dir) {
 }
 
 // ============================================================
-static bool getJpgSize(const char* path, int& w, int& h) {
-    File f = SD.open(path, FILE_READ);
+static bool getJpgSize(const char* path, int& w, int& h, fs::FS& fs) {
+    File f = fs.open(path, FILE_READ);
     if (!f) return false;
     if (f.read() != 0xFF || f.read() != 0xD8) { f.close(); return false; }
     while (f.available()) {
@@ -771,8 +851,8 @@ static bool getJpgSize(const char* path, int& w, int& h) {
     return false;
 }
 
-static bool getPngSize(const char* path, int& w, int& h) {
-    File f = SD.open(path, FILE_READ);
+static bool getPngSize(const char* path, int& w, int& h, fs::FS& fs) {
+    File f = fs.open(path, FILE_READ);
     if (!f) return false;
     uint8_t hdr[24];
     if (f.read(hdr, sizeof(hdr)) != sizeof(hdr)) { f.close(); return false; }
@@ -785,7 +865,7 @@ static bool getPngSize(const char* path, int& w, int& h) {
 }
 
 // ============================================================
-static void drawFullScreenImg(ImgKind kind, const char* path) {
+static void drawFullScreenImg(ImgKind kind, const char* path, fs::FS& fs) {
     auto& d = M5.Display;
     d.setEpdMode(epd_mode_t::epd_quality);
     d.fillScreen(TFT_WHITE);
@@ -794,11 +874,11 @@ static void drawFullScreenImg(ImgKind kind, const char* path) {
     const int scr_h = d.height();
 
     int iw = 0, ih = 0;
-    bool sz_ok = (kind == IMG_PNG) ? getPngSize(path, iw, ih)
-                                   : getJpgSize(path, iw, ih);
+    bool sz_ok = (kind == IMG_PNG) ? getPngSize(path, iw, ih, fs)
+                                   : getJpgSize(path, iw, ih, fs);
     if (!sz_ok) {
-        if (kind == IMG_PNG) d.drawPngFile(SD, path, 0, 0, scr_w, scr_h, 0, 0, 0.0f, middle_center);
-        else                 d.drawJpgFile(SD, path, 0, 0, scr_w, scr_h, 0, 0, 0.0f, middle_center);
+        if (kind == IMG_PNG) d.drawPngFile(fs, path, 0, 0, scr_w, scr_h, 0, 0, 0.0f, middle_center);
+        else                 d.drawJpgFile(fs, path, 0, 0, scr_w, scr_h, 0, 0, 0.0f, middle_center);
         d.display();
         return;
     }
@@ -808,15 +888,15 @@ static void drawFullScreenImg(ImgKind kind, const char* path) {
     dst.setPsram(true); dst.setColorDepth(16);
     if (!src.createSprite(iw, ih) || !dst.createSprite(scr_w, scr_h)) {
         Serial.println("sprite alloc failed, fallback");
-        if (kind == IMG_PNG) d.drawPngFile(SD, path, 0, 0, scr_w, scr_h, 0, 0, 0.0f, middle_center);
-        else                 d.drawJpgFile(SD, path, 0, 0, scr_w, scr_h, 0, 0, 0.0f, middle_center);
+        if (kind == IMG_PNG) d.drawPngFile(fs, path, 0, 0, scr_w, scr_h, 0, 0, 0.0f, middle_center);
+        else                 d.drawJpgFile(fs, path, 0, 0, scr_w, scr_h, 0, 0, 0.0f, middle_center);
         d.display();
         src.deleteSprite(); dst.deleteSprite();
         return;
     }
     src.fillSprite(TFT_WHITE);
-    if (kind == IMG_PNG) src.drawPngFile(SD, path, 0, 0, iw, ih);
-    else                 src.drawJpgFile(SD, path, 0, 0, iw, ih);
+    if (kind == IMG_PNG) src.drawPngFile(fs, path, 0, 0, iw, ih);
+    else                 src.drawJpgFile(fs, path, 0, 0, iw, ih);
 
     dst.fillSprite(TFT_WHITE);
 
@@ -843,13 +923,23 @@ static void drawFullScreenImg(ImgKind kind, const char* path) {
 }
 
 // ============================================================
-static void showCurrentImage() {
-    if (s_image_idx.empty()) return;
+// 戻り値: true=表示成功, false=ファイルが開けなかった (SD 抜けなど)
+static bool showCurrentImage() {
+    if (s_image_idx.empty()) return false;
     size_t ii = s_image_idx[s_pos];
     const Item& it = s_items[ii];
     std::string full = joinPath(s_current_dir, it.name);
     Serial.printf("[%u/%u] %s\n",
                   (unsigned)(s_pos + 1), (unsigned)s_image_idx.size(), full.c_str());
+
+    // ファイルが開けるか事前チェック (SD 抜け検出)
+    File tf = SD.open(full.c_str(), FILE_READ);
+    if (!tf) {
+        Serial.println("[WARN] cannot open file – SD removed?");
+        return false;
+    }
+    tf.close();
+
     // 案 C: デコード中は 240MHz、終わったら 80MHz に戻す
     cpuHigh();
     drawFullScreenImg(it.kind, full.c_str());
@@ -857,6 +947,17 @@ static void showCurrentImage() {
     cpuLow();
     // 表示するたびに位置を保存 (電源 OFF でも復帰できる)
     savePosition();
+    return true;
+}
+
+// showCurrentImage のラッパー: 失敗時にエラー表示→スリープ
+static void showImageOrSleep() {
+    if (!showCurrentImage()) {
+        s_state = STATE_VIEW;
+        drawError(S().msg_no_sd);
+        delay(3000);
+        goToDeepSleep();
+    }
 }
 
 // ============================================================
@@ -935,7 +1036,7 @@ static void showMenuOverlay() {
 
 static void hideMenuOverlay() {
     // メニュー領域だけ元画像に戻すのは手間なので、画像を再描画 (品質モード)
-    showCurrentImage();
+    showImageOrSleep();
 }
 
 // ============================================================
@@ -1124,15 +1225,78 @@ static void drawError(const char* msg) {
 // ============================================================
 // 設定画面
 // ============================================================
-static Rect settingsLangJaRect() { return { 160, 230, 280, 80 }; }
-static Rect settingsLangEnRect() { return { 520, 230, 280, 80 }; }
-static Rect settingsBackRect()   { return { 380, 430, 200, 64 }; }
+static Rect settingsLangJaRect()    { return { 160, 130, 280, 64 }; }
+static Rect settingsLangEnRect()    { return { 520, 130, 280, 64 }; }
+static Rect settingsRotNormalRect() { return { 160, 248, 280, 64 }; }
+static Rect settingsRotFlipRect()   { return { 520, 248, 280, 64 }; }
+static Rect settingsSaveFavRect()   { return { 250, 400, 460, 60 }; }  // 中央
+static Rect settingsBackRect()      { return { 680, 478, 240, 54 }; }  // 右下
+
+// お気に入り画像を LittleFS に保存 (1枚のみ上書き)
+static bool saveFavorite() {
+    if (s_image_idx.empty()) return false;
+    size_t ii = s_image_idx[s_pos];
+    const Item& it = s_items[ii];
+    std::string src_path = joinPath(s_current_dir, it.name);
+
+    // 拡張子を判定して保存先パスを決定
+    const char* fav_path = (it.kind == IMG_PNG) ? "/fav.png" : "/fav.jpg";
+
+    // 既存のお気に入りを削除
+    LittleFS.remove("/fav.png");
+    LittleFS.remove("/fav.jpg");
+
+    // SD から読み込んで LittleFS に書き込み
+    File src_f = SD.open(src_path.c_str(), FILE_READ);
+    if (!src_f) return false;
+
+    size_t file_size = src_f.size();
+    size_t fs_total = LittleFS.totalBytes();
+    size_t fs_used  = LittleFS.usedBytes();
+    if (file_size > (fs_total - fs_used)) {
+        src_f.close();
+        Serial.printf("[FAV] file too large: %u > %u free\n",
+                      (unsigned)file_size, (unsigned)(fs_total - fs_used));
+        return false;
+    }
+
+    File dst_f = LittleFS.open(fav_path, FILE_WRITE);
+    if (!dst_f) { src_f.close(); return false; }
+
+    uint8_t buf[4096];
+    size_t written = 0;
+    while (src_f.available()) {
+        size_t n = src_f.read(buf, sizeof(buf));
+        dst_f.write(buf, n);
+        written += n;
+    }
+    dst_f.close();
+    src_f.close();
+    Serial.printf("[FAV] saved %u bytes to %s\n", (unsigned)written, fav_path);
+    return true;
+}
+
+// LittleFS にお気に入り画像があるか確認し、パスと種別を返す
+static bool hasFavorite(const char*& path, ImgKind& kind) {
+    if (LittleFS.exists("/fav.png")) { path = "/fav.png"; kind = IMG_PNG; return true; }
+    if (LittleFS.exists("/fav.jpg")) { path = "/fav.jpg"; kind = IMG_JPG; return true; }
+    return false;
+}
 
 static void saveLang(uint8_t lang) {
     s_lang = lang;
     Preferences prefs;
-    prefs.begin("viewer", false);   // read-write
+    prefs.begin("viewer", false);
     prefs.putUChar("lang", s_lang);
+    prefs.end();
+}
+
+static void saveRotation(uint8_t rot) {
+    s_rotation = rot;
+    M5.Display.setRotation(s_rotation);
+    Preferences prefs;
+    prefs.begin("viewer", false);
+    prefs.putUChar("rot", s_rotation);
     prefs.end();
 }
 
@@ -1142,20 +1306,18 @@ static void showSettings() {
     d.fillScreen(TFT_WHITE);
     const int W = d.width();
 
-    // アプリ名 + バージョン + 設定タイトル
+    // アプリ名 (中央) + バージョン (右上) + 設定タイトル
     d.setTextColor(TFT_BLACK, TFT_WHITE);
     d.setFont(&fonts::FreeSansBold18pt7b);
     d.setTextDatum(middle_center);
-    d.drawString("M5PaperS3-PocketFrame", W / 2, 28);
-    d.setFont(&fonts::efontJA_24);
-    d.drawString("v1.0", W / 2, 60);
+    d.drawString("M5PaperS3-PocketFrame v1.1", W / 2, 28);
     d.setFont(&fonts::efontJA_24_b);
-    d.drawString(S().settings_title, W / 2, 90);
-    d.drawFastHLine(0, 110, W, TFT_BLACK);
+    d.drawString(S().settings_title, W / 2, 65);
+    d.drawFastHLine(0, 85, W, TFT_BLACK);
 
     // 言語選択ラベル
     d.setFont(&fonts::efontJA_24);
-    d.drawString(S().settings_lang, W / 2, 160);
+    d.drawString(S().settings_lang, W / 2, 110);
 
     // 日本語ボタン
     Rect ja = settingsLangJaRect();
@@ -1182,7 +1344,54 @@ static void showSettings() {
     }
     d.drawString("English", en.x + en.w / 2, en.y + en.h / 2);
 
-    // 戻るボタン
+    // 回転ラベル
+    d.setFont(&fonts::efontJA_24);
+    d.setTextColor(TFT_BLACK, TFT_WHITE);
+    d.drawString(S().settings_rotation, W / 2, 225);
+
+    // 通常ボタン
+    Rect rn = settingsRotNormalRect();
+    if (s_rotation == 1) {
+        d.fillRect(rn.x, rn.y, rn.w, rn.h, TFT_BLACK);
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+    } else {
+        d.drawRect(rn.x, rn.y, rn.w, rn.h, TFT_BLACK);
+        d.drawRect(rn.x + 1, rn.y + 1, rn.w - 2, rn.h - 2, TFT_BLACK);
+        d.setTextColor(TFT_BLACK, TFT_WHITE);
+    }
+    d.setFont(&fonts::efontJA_24_b);
+    d.drawString(S().settings_rot_normal, rn.x + rn.w / 2, rn.y + rn.h / 2);
+
+    // 180° 回転ボタン
+    Rect rf = settingsRotFlipRect();
+    if (s_rotation == 3) {
+        d.fillRect(rf.x, rf.y, rf.w, rf.h, TFT_BLACK);
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+    } else {
+        d.drawRect(rf.x, rf.y, rf.w, rf.h, TFT_BLACK);
+        d.drawRect(rf.x + 1, rf.y + 1, rf.w - 2, rf.h - 2, TFT_BLACK);
+        d.setTextColor(TFT_BLACK, TFT_WHITE);
+    }
+    d.drawString(S().settings_rot_flip, rf.x + rf.w / 2, rf.y + rf.h / 2);
+
+    // 説明テキスト
+    d.setFont(&fonts::efontJA_16);
+    d.setTextColor(TFT_BLACK, TFT_WHITE);
+    d.drawString(S().save_fav_desc1, W / 2, 350);
+    d.drawString(S().save_fav_desc2, W / 2, 375);
+
+    // 本体に画像を保存ボタン (中央)
+    d.setFont(&fonts::efontJA_24_b);
+    Rect fv = settingsSaveFavRect();
+    d.drawRect(fv.x, fv.y, fv.w, fv.h, TFT_BLACK);
+    d.drawRect(fv.x + 1, fv.y + 1, fv.w - 2, fv.h - 2, TFT_BLACK);
+    d.setTextColor(TFT_BLACK, TFT_WHITE);
+    d.drawString(S().btn_save_fav, fv.x + fv.w / 2, fv.y + fv.h / 2);
+
+    // 区切り線
+    d.drawFastHLine(0, fv.y + fv.h + 10, W, TFT_BLACK);
+
+    // 戻るボタン (右下)
     Rect bk = settingsBackRect();
     d.fillRect(bk.x, bk.y, bk.w, bk.h, TFT_BLACK);
     d.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -1417,14 +1626,14 @@ static void startSlideshow(const std::string& dir, uint32_t interval_ms) {
         scanDir(s_current_dir.c_str());
         if (s_pos >= s_image_idx.size()) s_pos = 0;
         s_state = STATE_VIEW;
-        showCurrentImage();
+        showImageOrSleep();
         return;
     }
 
     s_ss_interval_ms = interval_ms;
     s_pos = 0;
     s_state = STATE_SLIDESHOW;
-    showCurrentImage();
+    showImageOrSleep();
 
     if (interval_ms >= DEEP_SLEEP_THRESHOLD_MS) {
         // 案 B: deep sleep (画像を表示後すぐ完全電源 OFF)
@@ -1441,7 +1650,7 @@ static void stopSlideshow() {
     Serial.println("Stop slideshow");
     s_rtc_ss_active = false;     // deep sleep 継続フラグもクリア
     s_state = STATE_VIEW;
-    showCurrentImage();
+    showImageOrSleep();
 }
 
 // ============================================================
@@ -1486,7 +1695,15 @@ static void handleSlideshowResume() {
     s_pos = (s_pos + 1) % s_image_idx.size();
 
     cpuHigh();
-    showCurrentImage();
+    if (!showCurrentImage()) {
+        cpuLow();
+        Serial.println("[SS] image read failed during deep sleep resume");
+        s_rtc_ss_active = false;
+        drawError(S().msg_no_sd);
+        delay(3000);
+        goToDeepSleep();
+        return;  // 念のため
+    }
     cpuLow();
 
     enterSlideshowDeepSleep(s_rtc_ss_interval_ms);
