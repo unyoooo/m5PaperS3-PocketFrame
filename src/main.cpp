@@ -19,6 +19,7 @@
 #include <esp32-hal-cpu.h>
 #include <Preferences.h>
 #include <LittleFS.h>
+#include <driver/gpio.h>
 #include <vector>
 #include <algorithm>
 #include <string>
@@ -1198,7 +1199,23 @@ static void goToDeepSleep() {
     }
 
     drawSleepMark();
+
+    // --- 省電力シャットダウン ---
     SD.end(); SDSPI.end();
+    LittleFS.end();
+    WiFi.mode(WIFI_OFF);
+
+    // 未使用ピンのリーク電流対策 (M5PaperS3 使用ピン以外を isolate)
+    // M5Unified 管理ピン (EPD, タッチ, 電源等) は触らない
+    // SD ピン (38,39,40,47) は SD.end() 後に pull-down
+    const int sd_pins[] = { SD_SCK, SD_MISO, SD_MOSI, SD_CS };
+    for (int p : sd_pins) {
+        gpio_reset_pin((gpio_num_t)p);
+        gpio_set_direction((gpio_num_t)p, GPIO_MODE_INPUT);
+        gpio_pulldown_en((gpio_num_t)p);
+        gpio_pullup_dis((gpio_num_t)p);
+    }
+
     Serial.println("Deep sleep. Press power button to wake.");
     Serial.flush();
     M5.Power.deepSleep();
@@ -1668,7 +1685,20 @@ static void enterSlideshowDeepSleep(uint32_t interval_ms) {
     savePosition();
 
     Serial.printf("[SS] deep sleep for %lu ms\n", (unsigned long)interval_ms);
+
+    // --- 省電力シャットダウン ---
     SD.end(); SDSPI.end();
+    LittleFS.end();
+    WiFi.mode(WIFI_OFF);
+
+    const int sd_pins[] = { SD_SCK, SD_MISO, SD_MOSI, SD_CS };
+    for (int p : sd_pins) {
+        gpio_reset_pin((gpio_num_t)p);
+        gpio_set_direction((gpio_num_t)p, GPIO_MODE_INPUT);
+        gpio_pulldown_en((gpio_num_t)p);
+        gpio_pullup_dis((gpio_num_t)p);
+    }
+
     Serial.flush();
     // 画面はそのまま残す (SLEEP マークは描かない)
     M5.Power.deepSleep((uint64_t)interval_ms * 1000ULL);
