@@ -593,18 +593,20 @@ void loop() {
                 bool hit = false;
                 for (int i = 0; i < PICKER_DIGITS; ++i) {
                     if (inRect(pickerUpRect(i), t.x, t.y)) {
+                        int old[PICKER_DIGITS];
+                        for (int k = 0; k < PICKER_DIGITS; ++k) old[k] = s_pd[k];
                         pickerInc(i);
-                        redrawPickerDigit(i);
-                        // clamp で他桁も変わっている可能性 → 全桁更新
+                        // 変化した桁だけ再描画 (通常は1桁のみ、clamp時のみ全桁)
                         for (int j = 0; j < PICKER_DIGITS; ++j)
-                            if (j != i) redrawPickerDigit(j);
+                            if (s_pd[j] != old[j]) redrawPickerDigit(j);
                         hit = true; break;
                     }
                     if (inRect(pickerDnRect(i), t.x, t.y)) {
+                        int old[PICKER_DIGITS];
+                        for (int k = 0; k < PICKER_DIGITS; ++k) old[k] = s_pd[k];
                         pickerDec(i);
-                        redrawPickerDigit(i);
                         for (int j = 0; j < PICKER_DIGITS; ++j)
-                            if (j != i) redrawPickerDigit(j);
+                            if (s_pd[j] != old[j]) redrawPickerDigit(j);
                         hit = true; break;
                     }
                 }
@@ -1045,7 +1047,7 @@ static void hideMenuOverlay() {
 // ============================================================
 static void showList() {
     auto& d = M5.Display;
-    d.setEpdMode(epd_mode_t::epd_quality);
+    d.setEpdMode(epd_mode_t::epd_fast);
     d.fillScreen(TFT_WHITE);
     const int w = d.width();
     const int h = d.height();
@@ -1224,7 +1226,7 @@ static void goToDeepSleep() {
 // ============================================================
 static void drawError(const char* msg) {
     auto& d = M5.Display;
-    d.setEpdMode(epd_mode_t::epd_quality);
+    d.setEpdMode(epd_mode_t::epd_fast);
     d.fillScreen(TFT_WHITE);
     d.setTextColor(TFT_BLACK, TFT_WHITE);
     // アプリ名
@@ -1319,7 +1321,7 @@ static void saveRotation(uint8_t rot) {
 
 static void showSettings() {
     auto& d = M5.Display;
-    d.setEpdMode(epd_mode_t::epd_quality);
+    d.setEpdMode(epd_mode_t::epd_fast);
     d.fillScreen(TFT_WHITE);
     const int W = d.width();
 
@@ -1327,7 +1329,7 @@ static void showSettings() {
     d.setTextColor(TFT_BLACK, TFT_WHITE);
     d.setFont(&fonts::FreeSansBold18pt7b);
     d.setTextDatum(middle_center);
-    d.drawString("M5PaperS3-PocketFrame v1.1", W / 2, 28);
+    d.drawString("M5PaperS3-PocketFrame v1.2", W / 2, 28);
     d.setFont(&fonts::efontJA_24_b);
     d.drawString(S().settings_title, W / 2, 65);
     d.drawFastHLine(0, 85, W, TFT_BLACK);
@@ -1531,7 +1533,7 @@ static void drawTriangleDown(int cx, int cy, int sz, uint16_t color) {
 
 static void showIntervalPicker() {
     auto& d = M5.Display;
-    d.setEpdMode(epd_mode_t::epd_quality);
+    d.setEpdMode(epd_mode_t::epd_fast);
     d.fillScreen(TFT_WHITE);
 
     const int W = d.width();
@@ -1620,9 +1622,8 @@ static void redrawPickerDigit(int idx) {
     snprintf(buf, sizeof(buf), "%d", s_pd[idx]);
     d.drawString(buf, dr.x + dr.w / 2, dr.y + dr.h / 2);
     d.setTextDatum(top_left);
+    // 連打時の遅延を避けるため waitDisplay は呼ばない (次の display で自動待機)
     d.display();
-    d.waitDisplay();
-    d.setEpdMode(epd_mode_t::epd_quality);
 }
 
 // ============================================================
@@ -2220,7 +2221,7 @@ static void handleApiMove() {
 // ---- 画面: QR + SSID/PW/URL + 終了ボタン ----
 static void drawCommScreen(const char* ssid, const char* pass, const char* url) {
     auto& d = M5.Display;
-    d.setEpdMode(epd_mode_t::epd_quality);
+    d.setEpdMode(epd_mode_t::epd_fast);
     d.fillScreen(TFT_WHITE);
     const int W = d.width();
     const int H = d.height();

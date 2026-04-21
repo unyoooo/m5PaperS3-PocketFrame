@@ -1,6 +1,6 @@
 {
   "name": "M5PaperS3-PocketFrame",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "builds": [
     {
       "chipFamily": "ESP32-S3",

@@ -186,5 +186,6 @@ MIT
 
 ## Version
 
+- **v1.2** — Improved deep sleep power saving, faster UI rendering (all menus use epd_fast), snappier interval picker
 - **v1.1** — Settings: 180° rotation, save image to device (LittleFS), SD-removal safety
 - **v1.0** — Initial release
