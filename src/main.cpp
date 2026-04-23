@@ -580,8 +580,17 @@ void loop() {
                                 }
                                 s_state = STATE_VIEW;
                                 showImageOrSleep();
+                            } else if (s_state == STATE_SS_PICK_FOLDER) {
+                                // SS_PICK_FOLDER: 画像タップ → その画像から再生
+                                // s_saved_file に開始ファイル名を入れておくと
+                                // startSlideshow() がそこから始める
+                                strncpy(s_saved_file, it.name.c_str(),
+                                        sizeof(s_saved_file) - 1);
+                                s_saved_file[sizeof(s_saved_file) - 1] = 0;
+                                s_ss_dir = s_current_dir;
+                                s_state  = STATE_SS_INTERVAL;
+                                showIntervalPicker();
                             }
-                            // SS_PICK_FOLDER で画像タップは無視 (フォルダ選択専用)
                         }
                     }
                 }
@@ -1649,7 +1658,17 @@ static void startSlideshow(const std::string& dir, uint32_t interval_ms) {
     }
 
     s_ss_interval_ms = interval_ms;
+    // 直前に見ていた画像から開始 (s_saved_file に最後表示のファイル名がある)
+    // 見つからなければ先頭から
     s_pos = 0;
+    if (s_saved_file[0] != 0) {
+        for (size_t i = 0; i < s_image_idx.size(); ++i) {
+            if (s_items[s_image_idx[i]].name == s_saved_file) {
+                s_pos = i;
+                break;
+            }
+        }
+    }
     s_state = STATE_SLIDESHOW;
     showImageOrSleep();
 
